@@ -26,6 +26,7 @@ class BBoxItem(QGraphicsRectItem):
 class CanvasView(QGraphicsView):
     box_created = Signal(float, float, float, float)
     box_selected = Signal(str, bool)
+    selection_cleared = Signal()
     box_changed = Signal(str, float, float, float, float)
     mouse_position = Signal(float, float)
 
@@ -37,6 +38,7 @@ class CanvasView(QGraphicsView):
         self.setDragMode(QGraphicsView.NoDrag)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
+        self.viewport().setCursor(Qt.CrossCursor)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.pixmap_item: QGraphicsPixmapItem | None = None
         self.items_by_uuid: dict[str, BBoxItem] = {}
@@ -52,6 +54,25 @@ class CanvasView(QGraphicsView):
         self._last = QPointF()
         self._temp_rect: QGraphicsRectItem | None = None
         self._active_item: BBoxItem | None = None
+        self._pending_select_uuid: str | None = None
+        self.mode = "smart"
+        self._panning = False
+        self._pan_start = None
+        self._h_scroll_start = 0
+        self._v_scroll_start = 0
+
+    def set_mouse_mode(self, mode: str) -> None:
+        self.mode = mode
+        self._drawing = False
+        self._moving = False
+        self._resizing = False
+        self._pending_select_uuid = None
+        if mode == "pan":
+            self.viewport().setCursor(Qt.OpenHandCursor)
+        elif mode in {"move", "resize"}:
+            self.viewport().setCursor(Qt.ArrowCursor)
+        else:
+            self.viewport().setCursor(Qt.CrossCursor)
 
     def set_frame(self, frame_bgr) -> None:
         self.scene.clear()
@@ -113,12 +134,28 @@ class CanvasView(QGraphicsView):
         self._start = pos
         self._last = pos
         if event.button() == Qt.MiddleButton:
-            self.setDragMode(QGraphicsView.ScrollHandDrag)
-            fake = event.clone()
-            super().mousePressEvent(fake)
+            self._panning = True
+            self._pan_start = event.position().toPoint()
+            self._h_scroll_start = self.horizontalScrollBar().value()
+            self._v_scroll_start = self.verticalScrollBar().value()
+            self.viewport().setCursor(Qt.ClosedHandCursor)
             return
         if event.button() != Qt.LeftButton:
             super().mousePressEvent(event)
+            return
+        if self.mode == "pan":
+            self._panning = True
+            self._pan_start = event.position().toPoint()
+            self._h_scroll_start = self.horizontalScrollBar().value()
+            self._v_scroll_start = self.verticalScrollBar().value()
+            self.viewport().setCursor(Qt.ClosedHandCursor)
+            return
+        if self.mode == "annotate":
+            self._drawing = True
+            self._temp_rect = QGraphicsRectItem(QRectF(pos, pos))
+            self._temp_rect.setPen(QPen(QColor("#ffd666"), 2, Qt.DashLine))
+            self._temp_rect.setZValue(20)
+            self.scene.addItem(self._temp_rect)
             return
         item = self._hit_item(pos)
         if item:
@@ -136,10 +173,19 @@ class CanvasView(QGraphicsView):
             self._active_item = item
             rect = item.rect()
             self._resize_mode = self._hit_mode(rect, pos)
-            self._resizing = self._resize_mode != "move"
-            self._moving = self._resize_mode == "move"
+            if self.mode == "move":
+                self._moving = True
+                self._resizing = False
+            elif self.mode == "resize":
+                self._resizing = self._resize_mode != "move"
+                self._moving = False
+                if not self._resizing:
+                    self._active_item = None
+            else:
+                self._resizing = self._resize_mode != "move"
+                self._moving = self._resize_mode == "move"
             self.viewport().setCursor(Qt.CrossCursor if self._resizing else Qt.SizeAllCursor)
-        else:
+        elif self.mode == "smart":
             self._drawing = True
             self._temp_rect = QGraphicsRectItem(QRectF(pos, pos))
             self._temp_rect.setPen(QPen(QColor("#ffd666"), 2, Qt.DashLine))
@@ -149,6 +195,21 @@ class CanvasView(QGraphicsView):
     def mouseMoveEvent(self, event) -> None:
         pos = self.mapToScene(event.position().toPoint())
         self.mouse_position.emit(pos.x(), pos.y())
+        if self._panning and self._pan_start is not None:
+            current = event.position().toPoint()
+            delta = current - self._pan_start
+            self.horizontalScrollBar().setValue(self._h_scroll_start - delta.x())
+            self.verticalScrollBar().setValue(self._v_scroll_start - delta.y())
+            return
+        if self._pending_select_uuid:
+            if (pos - self._start).manhattanLength() > 4:
+                self._drawing = True
+                self._pending_select_uuid = None
+                self._temp_rect = QGraphicsRectItem(QRectF(self._start, pos).normalized())
+                self._temp_rect.setPen(QPen(QColor("#ffd666"), 2, Qt.DashLine))
+                self._temp_rect.setZValue(20)
+                self.scene.addItem(self._temp_rect)
+            return
         if self._drawing and self._temp_rect:
             self._temp_rect.setRect(QRectF(self._start, pos).normalized())
             return
@@ -166,17 +227,28 @@ class CanvasView(QGraphicsView):
             self._last = pos
             return
         hover_item = self._hit_item(pos)
-        if hover_item:
+        if hover_item and self.mode in {"smart", "move", "resize"}:
             mode = self._hit_mode(hover_item.rect(), pos)
-            self.viewport().setCursor(Qt.CrossCursor if mode != "move" else Qt.SizeAllCursor)
+            if self.mode == "move":
+                self.viewport().setCursor(Qt.SizeAllCursor)
+            elif self.mode == "resize":
+                self.viewport().setCursor(Qt.CrossCursor if mode != "move" else Qt.ArrowCursor)
+            else:
+                self.viewport().setCursor(Qt.CrossCursor if mode != "move" else Qt.SizeAllCursor)
         else:
-            self.viewport().unsetCursor()
+            self.viewport().setCursor(Qt.ArrowCursor if self.mode in {"move", "resize"} else Qt.CrossCursor)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MiddleButton:
-            self.setDragMode(QGraphicsView.NoDrag)
-            super().mouseReleaseEvent(event)
+            self._panning = False
+            self._pan_start = None
+            self._restore_mode_cursor()
+            return
+        if self._panning:
+            self._panning = False
+            self._pan_start = None
+            self._restore_mode_cursor()
             return
         if self._drawing and self._temp_rect:
             rect = self._temp_rect.rect().normalized()
@@ -186,6 +258,10 @@ class CanvasView(QGraphicsView):
             if rect.width() > 3 and rect.height() > 3:
                 self.box_created.emit(rect.x(), rect.y(), rect.width(), rect.height())
             return
+        if self._pending_select_uuid:
+            self.box_selected.emit(self._pending_select_uuid, bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier)))
+            self._pending_select_uuid = None
+            return
         if self._active_item and (self._moving or self._resizing):
             rect = self._active_item.rect().normalized()
             self.box_changed.emit(self._active_item.ann.uuid, rect.x(), rect.y(), rect.width(), rect.height())
@@ -193,10 +269,18 @@ class CanvasView(QGraphicsView):
         self._moving = False
         self._resizing = False
         self._resize_mode = ""
-        self.viewport().unsetCursor()
+        if self.mode == "pan":
+            self.viewport().setCursor(Qt.OpenHandCursor)
+        elif self.mode in {"move", "resize"}:
+            self.viewport().setCursor(Qt.ArrowCursor)
+        else:
+            self.viewport().setCursor(Qt.CrossCursor)
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape:
+            self.selection_cleared.emit()
+            return
         primary_uuid = next(iter(self.selected_uuids), None)
         if primary_uuid and primary_uuid in self.items_by_uuid:
             step = 10 if event.modifiers() & Qt.ShiftModifier else 1
@@ -219,10 +303,29 @@ class CanvasView(QGraphicsView):
         super().keyPressEvent(event)
 
     def _hit_item(self, pos: QPointF) -> BBoxItem | None:
-        for item in reversed(list(self.items_by_uuid.values())):
-            if item.rect().adjusted(-12, -12, 12, 12).contains(pos):
-                return item
-        return None
+        candidates = []
+        for order, item in enumerate(self.items_by_uuid.values()):
+            rect = item.rect().normalized()
+            expanded = rect.adjusted(-12, -12, 12, 12)
+            if not expanded.contains(pos):
+                continue
+            mode = "move" if self.mode == "move" else self._hit_mode(rect, pos)
+            area = max(1.0, rect.width() * rect.height())
+            selected_rank = 0 if item.ann.uuid in self.selected_uuids else 1
+            if mode != "move":
+                priority = 0
+                distance = self._edge_distance(rect, pos)
+            elif rect.contains(pos):
+                priority = 1
+                distance = 0.0
+            else:
+                priority = 2
+                distance = self._edge_distance(rect, pos)
+            candidates.append((priority, distance, area, selected_rank, -order, item))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda value: value[:-1])
+        return candidates[0][-1]
 
     def _hit_mode(self, rect: QRectF, pos: QPointF) -> str:
         tolerance = 18
@@ -247,6 +350,22 @@ class CanvasView(QGraphicsView):
         if bottom:
             return "bottom"
         return "move"
+
+    def _edge_distance(self, rect: QRectF, pos: QPointF) -> float:
+        return min(
+            abs(pos.x() - rect.left()),
+            abs(pos.x() - rect.right()),
+            abs(pos.y() - rect.top()),
+            abs(pos.y() - rect.bottom()),
+        )
+
+    def _restore_mode_cursor(self) -> None:
+        if self.mode == "pan":
+            self.viewport().setCursor(Qt.OpenHandCursor)
+        elif self.mode in {"move", "resize"}:
+            self.viewport().setCursor(Qt.ArrowCursor)
+        else:
+            self.viewport().setCursor(Qt.CrossCursor)
 
     def _resize_rect(self, rect: QRectF, delta: QPointF) -> QRectF:
         mode = self._resize_mode

@@ -6,7 +6,7 @@ import yaml
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtCore import QSettings
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         self.canvas = CanvasView()
         self.canvas.box_created.connect(self.create_box)
         self.canvas.box_selected.connect(self.select_box)
+        self.canvas.selection_cleared.connect(self.clear_selection)
         self.canvas.box_changed.connect(self.update_box)
         self.canvas.mouse_position.connect(self.update_mouse_pos)
         self.stack = QStackedWidget()
@@ -101,6 +102,8 @@ class MainWindow(QMainWindow):
             ("paste", "粘贴", "Ctrl+V", self.paste_clipboard),
             ("copy_prev", "复制上一帧", "Ctrl+Shift+V", self.copy_previous_frame),
             ("delete", "删除", "Delete", self.delete_selected),
+            ("clear_selection", "取消选择", "Esc", self.clear_selection),
+            ("select_all", "全选当前帧", "Ctrl+A", self.select_all_current_frame),
             ("interp", "插值", "", self.interpolate),
             ("track", "自动跟踪", "T", self.track_selected),
             ("track_next", "跟踪到下一帧", "", self.track_selected_to_next_frame),
@@ -135,6 +138,25 @@ class MainWindow(QMainWindow):
             act.setShortcut(QKeySequence(str(i)))
             act.triggered.connect(lambda _=False, n=i: self.apply_class_shortcut(n))
             self.addAction(act)
+
+        self.mouse_mode_group = QActionGroup(self)
+        self.mouse_mode_group.setExclusive(True)
+        mode_specs = [
+            ("mode_smart", "智能默认", "smart", "空白画框，框内移动，边角缩放"),
+            ("mode_annotate", "十字标注", "annotate", "十字光标拖拽新建 bbox"),
+            ("mode_move", "移动框", "move", "选择并移动 bbox"),
+            ("mode_resize", "调整大小", "resize", "拖动边或角调整 bbox 大小"),
+            ("mode_pan", "拖动画面", "pan", "左键拖动画布"),
+        ]
+        for key, text, mode, tip in mode_specs:
+            act = QAction(text, self)
+            act.setCheckable(True)
+            act.setToolTip(tip)
+            act.triggered.connect(lambda _checked=False, m=mode: self.set_mouse_mode(m))
+            self.mouse_mode_group.addAction(act)
+            self.actions[key] = act
+            self.addAction(act)
+        self.actions["mode_smart"].setChecked(True)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("文件")
@@ -173,6 +195,15 @@ class MainWindow(QMainWindow):
         self.enter_tracker_combo.currentTextChanged.connect(self.save_enter_tracker_setting)
         self.enter_tracker_combo.setToolTip("按 Enter 跟踪到下一帧时使用的默认跟踪器")
         tb.addWidget(self.enter_tracker_combo)
+
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        mouse_tb = QToolBar("鼠标工具")
+        mouse_tb.setMovable(False)
+        self.addToolBar(Qt.TopToolBarArea, mouse_tb)
+        mouse_tb.addWidget(QLabel("鼠标模式"))
+        for key in ["mode_smart", "mode_annotate", "mode_move", "mode_resize", "mode_pan"]:
+            mouse_tb.addAction(self.actions[key])
+
         for key, tip in {
             "next": "下一帧 (D / →)",
             "prev": "上一帧 (A / ←)",
@@ -184,6 +215,11 @@ class MainWindow(QMainWindow):
 
     def save_enter_tracker_setting(self, value: str) -> None:
         self.settings.setValue("tracking/enter_algorithm", value)
+
+    def set_mouse_mode(self, mode: str) -> None:
+        self.canvas.set_mouse_mode(mode)
+        mode_text = {"smart": "智能默认", "annotate": "十字标注", "move": "移动框", "resize": "调整大小", "pan": "拖动画面"}.get(mode, mode)
+        self.update_status(f"鼠标模式: {mode_text}")
 
     def _build_docks(self) -> None:
         left = QDockWidget("项目与类别", self)
@@ -594,6 +630,23 @@ class MainWindow(QMainWindow):
             self.selected_uuids = {uuid}
             self.selected_uuid = uuid
         self.refresh_frame_annotations()
+
+    def clear_selection(self) -> None:
+        if not self.selected_uuids and not self.selected_uuid:
+            return
+        self.selected_uuid = None
+        self.selected_uuids = set()
+        self.refresh_frame_annotations()
+        self.update_status("已取消选择")
+
+    def select_all_current_frame(self) -> None:
+        if not self.project:
+            return
+        anns = self.store.frame_items(self.current_frame)
+        self.selected_uuids = {ann.uuid for ann in anns}
+        self.selected_uuid = anns[-1].uuid if anns else None
+        self.refresh_frame_annotations()
+        self.update_status(f"已全选当前帧 {len(anns)} 个框")
 
     def update_box(self, uuid: str, x: float, y: float, w: float, h: float) -> None:
         ann = next((a for a in self.store.annotations if a.uuid == uuid), None)
