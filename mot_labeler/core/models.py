@@ -88,6 +88,9 @@ class MediaInfo:
     fps: float
     frame_count: int
     image_files: list[str] = field(default_factory=list)
+    original_path: str = ""
+    relative_path: str = ""
+    image_file_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -114,4 +117,3 @@ class Project:
     @property
     def classes_file(self) -> Path:
         return self.root / "configs" / "classes.yaml"
-

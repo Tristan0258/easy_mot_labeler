@@ -187,6 +187,19 @@ project_name/
 - `annotations/backups/`：备份文件。
 - `configs/classes.yaml`：类别配置。
 
+## 媒体路径存储和项目搬迁
+
+项目会在 `project.yaml` 中保存媒体路径信息：
+
+- `media.path`：最近一次可用的数据源路径。
+- `media.original_path`：首次导入时的数据源路径。
+- `media.relative_path`：数据源相对于项目目录的位置。
+- `media.image_file_names`：图片序列的文件名列表。
+
+打开项目时，软件会先尝试原路径，再尝试项目相对路径。图片序列项目如果目录位置变化，只要目录内文件名和帧数保持一致，重新选择图片目录后即可恢复，并会把新路径写回项目文件。
+
+`文件 -> 项目另存为` 会把当前项目配置、类别和内部标注保存到新的项目目录；原始视频或图片不会被复制，适合大数据集标注项目备份或分支标注。
+
 ## 导出格式
 
 导出窗口支持三种格式。
@@ -206,6 +219,8 @@ seqinfo.ini
 frame,id,x,y,w,h,conf,class,visibility
 ```
 
+MOT 导出是按目标记录行的格式：没有目标的帧不会在 `gt.txt` 中生成空行，这是 MOT 格式的正常行为。帧总数由 `seqinfo.ini` 中的 `seqLength` 表示。
+
 ### YOLO 格式
 
 输出：
@@ -223,6 +238,8 @@ class x_center y_center width height
 
 坐标为归一化值。
 
+YOLO 导出会为每一帧生成一个 `.txt`。没有目标的图片会生成空 `.txt`，因此 `labels` 目录中的标签文件数量应和图片帧数量一致。
+
 ### LabelMe JSON 格式
 
 输出：
@@ -232,6 +249,8 @@ labelme/*.json
 ```
 
 每帧一个 JSON，bbox 保存为 `rectangle`。Track ID 写入 `group_id`，附加信息写入 `flags`。
+
+LabelMe 导出也会为每一帧生成一个 JSON。没有目标的帧会生成 `shapes: []` 的空标注 JSON。
 
 ## 标签合法性检查
 

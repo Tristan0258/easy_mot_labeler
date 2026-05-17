@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -36,9 +37,9 @@ from PySide6.QtWidgets import (
 
 from ..core.annotation_store import AnnotationStore
 from ..core.models import Annotation, BBox, ClassDef, Project, now_text
-from ..core.project import load_project, write_classes
+from ..core.project import load_project, resolve_media_paths, write_classes, write_project
 from ..io.export_mot import export_annotations
-from ..io.media_reader import MediaReader
+from ..io.media_reader import MediaReader, inspect_media
 from ..services.interpolation_service import interpolate_track
 from ..services.quality_service import QualityIssue, repair_annotations_in_place, run_quality_check
 from ..services.tracker_service import TrackerService
@@ -95,6 +96,7 @@ class MainWindow(QMainWindow):
             ("new", "新建项目", "Ctrl+N", self.new_project),
             ("open", "打开项目", "Ctrl+O", self.open_project),
             ("save", "保存", "Ctrl+S", self.save),
+            ("save_as", "项目另存为", "Ctrl+Shift+S", self.save_as),
             ("prev", "上一帧", "A", self.prev_frame),
             ("next", "下一帧", "D", self.next_frame),
             ("play", "播放/暂停", "Space", self.toggle_play),
@@ -160,7 +162,7 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("文件")
-        for key in ["new", "open", "save", "export"]:
+        for key in ["new", "open", "save", "save_as", "export"]:
             file_menu.addAction(self.actions[key])
         file_menu.addSeparator()
         file_menu.addAction("退出", self.close)
@@ -360,6 +362,10 @@ class MainWindow(QMainWindow):
 
     def load_project_object(self, project: Project) -> None:
         self.project = project
+        if not self.ensure_media_available(project):
+            self.project = None
+            self.update_status("项目媒体文件不可用")
+            return
         self.reader = MediaReader(project.media)
         autosave = project.autosave_file
         formal = project.annotation_file
@@ -378,6 +384,43 @@ class MainWindow(QMainWindow):
         self.frame_slider.setRange(0, max(0, project.media.frame_count - 1))
         self.stack.setCurrentWidget(self.canvas)
         self.load_frame()
+
+    def ensure_media_available(self, project: Project) -> bool:
+        if resolve_media_paths(project):
+            return True
+        media_name = "图片序列目录" if project.media.type == "images" else "视频文件"
+        choice = QMessageBox.question(
+            self,
+            "媒体路径失效",
+            f"找不到原始{media_name}。\n是否重新选择位置？",
+        )
+        if choice != QMessageBox.Yes:
+            return False
+        if project.media.type == "images":
+            selected = QFileDialog.getExistingDirectory(self, "重新选择图片序列目录")
+        else:
+            selected, _ = QFileDialog.getOpenFileName(self, "重新选择视频文件", "", "Video (*.mp4 *.avi *.mov *.mkv)")
+        if not selected:
+            return False
+        try:
+            new_media = inspect_media(Path(selected))
+        except Exception as exc:
+            QMessageBox.warning(self, "读取失败", str(exc))
+            return False
+        if new_media.type != project.media.type:
+            QMessageBox.warning(self, "媒体不匹配", "重新选择的数据源类型和项目原始数据源不一致。")
+            return False
+        if (
+            new_media.frame_count != project.media.frame_count
+            or new_media.width != project.media.width
+            or new_media.height != project.media.height
+        ):
+            QMessageBox.warning(self, "媒体不匹配", "重新选择的数据源帧数或分辨率和项目记录不一致。")
+            return False
+        new_media.original_path = project.media.original_path or project.media.path
+        project.media = new_media
+        write_project(project)
+        return True
 
     def load_frame(self) -> None:
         if not self.project or not self.reader:
@@ -890,22 +933,67 @@ class MainWindow(QMainWindow):
                     self.save()
                     self.refresh_frame_annotations()
                 repair_text = f"\n自动修复: 裁剪 {summary.clipped} 个框，删除 {summary.removed} 个无效框。"
-            export_annotations(
+            export_summary = export_annotations(
                 self.project,
                 self.store.annotations,
                 Path(folder),
                 dlg.format_combo.currentText(),
-                dlg.include_unconfirmed.isChecked(),
                 dlg.include_ignore.isChecked(),
             )
-            QMessageBox.information(self, "导出完成", f"已导出 {dlg.format_combo.currentText()} 标注。{repair_text}")
+            report = "\n".join(
+                [
+                    f"导出格式: {export_summary.export_format}",
+                    f"输出目录: {export_summary.output_dir}",
+                    f"标签文件数: {export_summary.label_files}",
+                    f"图片/帧总数: {export_summary.total_frames}",
+                    f"有实际标注的图片/帧: {export_summary.annotated_frames}",
+                    f"没有实际标注的图片/帧: {export_summary.empty_frames}",
+                    f"导出目标数: {export_summary.exported_objects}",
+                    export_summary.note,
+                    repair_text.strip(),
+                ]
+            ).strip()
+            QMessageBox.information(self, "导出完成报告", report)
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
+
+    def save_as(self) -> None:
+        if not self.project:
+            return
+        parent = QFileDialog.getExistingDirectory(self, "选择另存为位置")
+        if not parent:
+            return
+        default_name = f"{self.project.project_name}_copy"
+        name, ok = QInputDialog.getText(self, "项目另存为", "新项目名", text=default_name)
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.warning(self, "名称无效", "项目名不能为空。")
+            return
+        target_root = Path(parent) / name
+        if target_root.exists() and any(target_root.iterdir()):
+            choice = QMessageBox.question(self, "覆盖确认", "目标目录非空，是否覆盖项目配置和标注文件？")
+            if choice != QMessageBox.Yes:
+                return
+        try:
+            target_root.mkdir(parents=True, exist_ok=True)
+            self.project.project_name = name
+            self.project.root = target_root
+            write_project(self.project)
+            self.store.save(self.project.annotation_file, make_backup=False)
+            self.store.dirty = False
+            self.refresh_project_info()
+            self.update_status(f"项目已另存为: {target_root}")
+            QMessageBox.information(self, "另存为完成", f"项目已另存为:\n{target_root}")
+        except Exception as exc:
+            QMessageBox.critical(self, "另存为失败", str(exc))
 
     def save(self) -> None:
         if not self.project:
             return
         try:
+            write_project(self.project)
             write_classes(self.project)
             self.store.save(self.project.annotation_file, make_backup=True)
             self.update_status(f"已保存 | 自动保存开启 | 最近保存 {now_text()}")

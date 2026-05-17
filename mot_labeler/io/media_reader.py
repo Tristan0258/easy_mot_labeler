@@ -48,7 +48,17 @@ def inspect_media(path: Path) -> MediaInfo:
         if first is None:
             raise ValueError("无法读取图像序列的第一张图片。")
         height, width = first.shape[:2]
-        return MediaInfo("images", str(path), width, height, 25.0, len(files), [str(p) for p in files])
+        return MediaInfo(
+            "images",
+            str(path),
+            width,
+            height,
+            25.0,
+            len(files),
+            [str(p) for p in files],
+            original_path=str(path),
+            image_file_names=[p.name for p in files],
+        )
     if path.suffix.lower() not in VIDEO_EXTS:
         raise ValueError("不支持的数据源格式。")
     cap = cv2.VideoCapture(str(path))
@@ -61,6 +71,7 @@ def inspect_media(path: Path) -> MediaInfo:
         int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
         float(cap.get(cv2.CAP_PROP_FPS) or 25.0),
         int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+        original_path=str(path),
     )
     cap.release()
     return info
